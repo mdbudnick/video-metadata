@@ -4,11 +4,6 @@ describe("metadata service Unit tests", () => {
     const mockListenFn = jest.fn((port, callback) => callback());
     const mockGetFn = jest.fn();
     const mockUseFn = jest.fn();
-    
-    afterAll(() => {
-        jest.resetModules();
-        jest.resetAllMocks();
-    });
 
     jest.doMock("express", () => {
         return () => {
@@ -43,6 +38,27 @@ describe("metadata service Unit tests", () => {
                     return mockMongoClient;
                 }
             }
+        };
+    });
+
+    jest.doMock("amqplib", () => { // Mock the amqplib (RabbitMQ) library.
+        return { // Returns a mock version of the library.
+            connect: async () => { // Mock function to connect to RabbitMQ.
+                return { // Returns a mock "messaging connection".
+                    createChannel: async () => { // Mock function to create a messaging channel.
+                        return { // Returns a mock "messaging channel".
+                            assertExchange: async () => {},
+                            assertQueue: async () => {
+                                return {
+                                    queue: "my-queue", // Fake name for anonymous queue.
+                                };
+                            },
+                            bindQueue: async () => {},
+                            consume: () => {},
+                        };
+                    },
+                };
+            },
         };
     });
 
