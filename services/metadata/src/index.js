@@ -1,16 +1,30 @@
 const express = require("express");
 const mongodb = require("mongodb");
+const amqp = require('amqplib');
+const bodyParser = require("body-parser");
 
-function connectDb(dbhost, dbname) {
-    return mongodb.MongoClient.connect(dbhost, { useUnifiedTopology: true }) 
+function connectDb(dbHost, dbName) {
+    return mongodb.MongoClient.connect(dbHost, { useUnifiedTopology: true }) 
         .then(client => {
-            const db = client.db(dbname);
-            return {                
-                db: db,             
-                close: () => {      
+            const db = client.db(dbName);
+            return {
+                db: db,
+                close: () => {
                     return client.close();
                 },
             };
+        });
+}
+
+function connectRabbit(rabbitHost) {
+
+    // console.log(`Connecting to RabbitMQ server at ${rabbitHost}.`);
+
+    return amqp.connect(rabbitHost)
+        .then(messagingConnection => {
+            // console.log("Connected to RabbitMQ.");
+
+            return messagingConnection.createChannel();
         });
 }
 
@@ -19,10 +33,10 @@ function setupHandlers(microservice) {
     const videosCollection = microservice.db.collection("videos");
 
     microservice.app.get("/videos", (req, res) => {
-        videosCollection.find()
+        return videosCollection.find()
             .toArray()
             .then(videos => {
-                res.json({ 
+                res.json({
                     videos: videos
                 });
             })
@@ -32,39 +46,98 @@ function setupHandlers(microservice) {
                 res.sendStatus(500);
             });
     });
+
+    
+    microservice.app.get("/video", (req, res) => {
+        const videoId = new mongodb.ObjectID(req.query.id);
+        return videosCollection.findOne({ _id: videoId })
+            .then(video => {
+                if (!video) {
+                    res.sendStatus(404);
+                }
+                else {
+                    res.json({ video });
+                }
+            })
+            .catch(err => {
+                console.error(`Failed to get video ${videoId}.`);
+                console.error(err);
+                res.sendStatus(500);
+            });
+    });
+    
+    function consumeVideoUploadedMessage(msg) { 
+        console.log("Received a 'viewed-uploaded' message");
+
+        const parsedMsg = JSON.parse(msg.content.toString());
+
+        const videoMetadata = {
+            _id: new mongodb.ObjectID(parsedMsg.video.id),
+            name: parsedMsg.video.name,
+        };
+        
+        return videosCollection.insertOne(videoMetadata)
+            .then(() => {
+                console.log("Acknowledging message was handled.");                
+                microservice.messageChannel.ack(msg);
+            });
+    };
+
+    return microservice.messageChannel.assertExchange("video-uploaded", "fanout")
+        .then(() => {
+            return microservice.messageChannel.assertQueue("", {});
+        })
+        .then(response => {
+            const queueName = response.queue;
+            // console.log(`Created queue ${queueName}, binding it to "video-uploaded" exchange.`);
+            return microservice.messageChannel.bindQueue(queueName, "video-uploaded", "")
+                .then(() => {
+                    return microservice.messageChannel.consume(queueName, consumeVideoUploadedMessage);
+                });
+        });
 }
 
-function startHttpServer(dbConn) {
+//
+// Starts the Express HTTP server.
+//
+function startHttpServer(dbConn, messageChannel) {
     return new Promise(resolve => {
         const app = express();
-        console.log(express());
         const microservice = {
             app: app,
             db: dbConn.db,
-        }
+			messageChannel: messageChannel,
+        };
+		app.use(bodyParser.json());
         setupHandlers(microservice);
 
         const port = process.env.PORT && parseInt(process.env.PORT) || 3000;
-        const server = app.listen(port, () => { console.log('started service on port ' + port) });
-
-        microservice.close = () => {
-            return new Promise(resolve => {
-                server.close(() => {
-                    resolve();
+        const server = app.listen(port, () => {
+            microservice.close = () => {
+                return new Promise(resolve => {
+                    server.close(() => {
+            resolve();
+        });
+                })
+                .then(() => {
+                    return dbConn.close();
                 });
-            })
-            .then(() => {
-                return dbConn.close();
-            });
-        };
-        resolve(microservice);
+            };
+            resolve(microservice);
+        });
     });
 }
 
-function startMicroservice(dbhost, dbname) {
-    return connectDb(dbhost, dbname)
+function startMicroservice(dbHost, dbName, rabbitHost) {
+    return connectDb(dbHost, dbName)
         .then(dbConn => {
-            return startHttpServer(dbConn);
+			return connectRabbit(rabbitHost)
+				.then(messageChannel => {
+            		return startHttpServer(
+						dbConn, 
+						messageChannel
+					);	
+				});
         });
 }
 
@@ -81,20 +154,28 @@ function main() {
     
     const DBNAME = process.env.DBNAME;
         
-    return startMicroservice(DBHOST, DBNAME);
+	if (!process.env.RABBIT) {
+	    throw new Error("Please specify the name of the RabbitMQ host using environment variable RABBIT");
+	}
+	
+	const RABBIT = process.env.RABBIT;
+
+    return startMicroservice(DBHOST, DBNAME, RABBIT);
 }
 
 if (require.main === module) {
-    main()
-        .then(() => console.log("Microservice online."))
-        .catch(err => {
-            console.error("Microservice failed to start.");
-            console.error(err && err.stack || err);
-        });
+    
+	main()
+	    .then(() => console.log("Microservice online."))
+	    .catch(err => {
+	        console.error("Microservice failed to start.");
+	        console.error(err && err.stack || err);
+	    });
 }
 else {
-    // Otherwise we are running under test
+    // For testing
     module.exports = {
         startMicroservice,
     };
 }
+
