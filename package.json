@@ -4,6 +4,7 @@
   "description": "Endpoint for getting video metadata",
   "main": "index.js",
   "scripts": {
+    "prestart": "cp scripts/pre-commit .git/hooks/ && chmod +x .git/hooks/pre-commit && echo 'test precommit hook copied'",
     "test": "jest"
   },
   "author": "",
